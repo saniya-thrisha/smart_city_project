@@ -1,0 +1,104 @@
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
+from sklearn.preprocessing import StandardScaler, PolynomialFeatures
+from sklearn.decomposition import PCA
+from sklearn.impute import KNNImputer
+from sklearn.metrics import accuracy_score
+from imblearn.over_sampling import SMOTE
+import xgboost as xgb
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, Dropout, BatchNormalization
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+
+# Load dataset
+df = pd.read_csv("water_potability.csv")
+
+# Handle missing values using KNN Imputer
+imputer = KNNImputer(n_neighbors=5)
+df.iloc[:, :] = imputer.fit_transform(df)
+
+# Split dataset into features and labels
+X = df.drop(columns=['Potability'])
+y = df['Potability']
+
+# Apply SMOTE for class imbalance handling
+smote = SMOTE(random_state=42)
+X_resampled, y_resampled = smote.fit_resample(X, y)
+
+# Feature Engineering - Polynomial Features
+poly = PolynomialFeatures(degree=2, interaction_only=True, include_bias=False)
+X_poly = poly.fit_transform(X_resampled)
+
+# Dimensionality Reduction using PCA
+pca = PCA(n_components=20)
+X_pca = pca.fit_transform(X_poly)
+
+# Split data into training and testing sets
+X_train, X_test, y_train, y_test = train_test_split(X_pca, y_resampled, test_size=0.2, random_state=42, stratify=y_resampled)
+
+# Standardization
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+# Define Neural Network Model
+def create_nn_model(input_dim):
+    model = Sequential([
+        Dense(1024, activation='relu', input_shape=(input_dim,)),
+        BatchNormalization(),
+        Dropout(0.5),
+        Dense(512, activation='relu'),
+        BatchNormalization(),
+        Dropout(0.4),
+        Dense(256, activation='relu'),
+        BatchNormalization(),
+        Dropout(0.3),
+        Dense(128, activation='relu'),
+        Dropout(0.2),
+        Dense(1, activation='sigmoid')
+    ])
+    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=5e-5), loss='binary_crossentropy', metrics=['accuracy'])
+    return model
+
+# Initialize the Neural Network
+input_dim = X_train_scaled.shape[1]
+nn_model = create_nn_model(input_dim)
+
+# Early stopping & LR Scheduler
+early_stopping = EarlyStopping(monitor='val_loss', patience=20, restore_best_weights=True)
+lr_scheduler = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=7, verbose=1, min_lr=1e-7)
+
+# Train Neural Network
+nn_model.fit(X_train_scaled, y_train, epochs=400, batch_size=64, validation_data=(X_test_scaled, y_test), callbacks=[early_stopping, lr_scheduler], verbose=1)
+
+# Get NN Predictions
+nn_preds = (nn_model.predict(X_test_scaled) > 0.5).astype(int).flatten()
+
+# Define Other Classifiers
+rf_model = RandomForestClassifier(n_estimators=2500, max_depth=50, min_samples_split=2, min_samples_leaf=1, class_weight='balanced', random_state=42)
+lr_model = LogisticRegression(class_weight='balanced', max_iter=2500, C=0.8, random_state=42)
+gb_model = GradientBoostingClassifier(n_estimators=1500, learning_rate=0.012, max_depth=9, random_state=42)
+xgb_model = xgb.XGBClassifier(n_estimators=1500, learning_rate=0.012, max_depth=15, random_state=42)
+
+# Train classifiers
+rf_model.fit(X_train_scaled, y_train)
+lr_model.fit(X_train_scaled, y_train)
+gb_model.fit(X_train_scaled, y_train)
+xgb_model.fit(X_train_scaled, y_train)
+
+# Get Predictions
+rf_preds = rf_model.predict(X_test_scaled)
+lr_preds = lr_model.predict(X_test_scaled)
+gb_preds = gb_model.predict(X_test_scaled)
+xgb_preds = xgb_model.predict(X_test_scaled)
+
+# Combine Predictions using Weighted Averaging
+final_preds = (0.4 * nn_preds + 0.3 * rf_preds + 0.2 * gb_preds + 0.1 * xgb_preds)
+final_preds = np.round(final_preds)
+# Compute Accuracy
+accuracy_combined = accuracy_score(y_test, final_preds) * 100
+print(f"Optimized Hybrid Model Accuracy: {accuracy_combined:.2f}%")
